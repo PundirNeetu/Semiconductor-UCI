@@ -1,0 +1,1278 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+#===========================DATA PREPROCESSING==========================================#
+
+#To Set Up Language as english (if system's language is other than english)
+
+```{r}
+#=====Change the language of system to english====================================
+Sys.setenv(LANG="en")
+
+```
+#Checking the required libraries and installing them
+```{r}
+#====looking for pacman library and install it if not exist====
+if(!require("pacman"))
+  install.packages("pacman")
+library(pacman)
+```
+
+#with the help of pload we are going to install other required libraries
+```{r}
+#now pacman hepls to install all the other required libraries which are required all through out the aanalysis
+pacman::p_load(data.table,plotly,DMwR,mice,missForest,ROSE,rpart,glmnet,plotmo,xgboost,caret,dplyr,VIM,Hmisc,psych,gbm,ISLR,randomForest,zoo,lattice,grid,class,e1071,Boruta,Metrics,ggplot2,tree,MASS,rpart.plot,mvtnorm,PRROC,caTools,pROC,MLmetrics,ROCR,car)
+
+```
+
+#loading the data from UCI repository
+
+```{r}
+#====secom data contains the semiconductor data set loaded from UCI repository 
+secom_data<- read.table("https://archive.ics.uci.edu/ml/machine-learning-databases/secom/secom.data")
+
+#=====secom_labels contains the label of the previously loaded dataset 
+secom_labels<- read.table("https://archive.ics.uci.edu/ml/machine-learning-databases/secom/secom_labels.data")
+
+```
+
+
+#Merging the secom_labels with the secom_data and named the script columns as "Class","time","Features1","Feature2" and so on till  all columns end
+```{r}
+#combining the secom_data and secom_label in secom_merge_data
+secom_merge_data<-cbind(secom_labels, secom_data)
+
+#columns in secom_merge_dataset has been given name according to the description 
+colnames(secom_merge_data) <- c("Class", "Time", paste0(rep("Feature", ncol(secom_data)),                                   seq(1,ncol(secom_data))))
+
+# the coulmn class of secom_merge_dataset has been renamed as  fail(as 1) & pass(as -1)
+secom_merge_data$Class <- factor(secom_merge_data$Class,
+                                 levels = c(-1,1), 
+                                 labels = c("pass", "fail"))
+
+#converting the column Time into calander day-time format
+#the time column of secom_merge_dataset is converted to calender date and time
+secom_merge_data$Time <-  as.POSIXct(secom_merge_data$Time, 
+                                     format = "%d/%m/%Y %H:%M:%S", 
+                                     tz = "GMT")
+
+```
+#compact summary of data in R we can see that there are some missing values and equal values
+
+```{r}
+# Analysing the summary and description of secom_merge_dataset 
+
+str(secom_merge_data, list.len=8)
+summary(secom_merge_data[,1:10])
+dim(secom_merge_data)
+
+```
+
+
+
+#============ANALYSING MISSING AND REDUNDANT VALUE======================================#
+
+#we will check missing value of each feature. so first we start looking over all missing values row wise and columnwise. In the graph below we saw that, there are not more than 25.7% of missing value in each row however, some columns have high percentage of missing value. Therefore, we decided to drop out the column which contain more than 55% and impute the remaining missing value in columns.
+
+```{r}
+#missing value in rows
+row_NA<- apply(secom_merge_data,1,function(x)sum(is.na(x))/ncol(secom_merge_data))
+
+#missing value in column
+col_NA<- apply(secom_merge_data,2,function(x) sum(is.na(x))/nrow(secom_merge_data))
+
+#scatter plot of missing element (row wise)
+plot_ly(x = seq(1,nrow(secom_merge_data)), y = row_NA, type = "scatter", mode = "markers") %>%
+  layout(title = "Row Wise Missing Values Percentage",
+         xaxis = list(title = "row Index"),
+         yaxis = list(title = "Percentage(%)"))
+
+#scatter plot of missing elements (coulumn wise)
+plot_ly(x = seq(1,ncol(secom_merge_data)), y = col_NA, type = "scatter", mode = "markers") %>%
+  layout(title = "Column wise Missing Values Percentage",
+         xaxis = list(title = "column Index"),
+         yaxis = list(title = "Percentage(%)"))
+```
+
+# After observing the above scatter plots we decided to 
+#1)remove the single value/redundant columns 
+#2)time and class column
+#3)column which have missing value greater than 55% from our dataset, as they won't affect the prediction much
+```{r}
+
+#finally data_reduced has been created which don't contain: 
+ #a)columns where missing value is greater than 55%
+secom_cleandata <- secom_merge_data[, -which(colMeans(is.na(secom_merge_data)) >= 0.55)]
+
+#b)the columns with Time,Class have been removed
+data_reduce_1<-secom_cleandata[,-c(1:2)]
+
+#c) columns with single value also are not useful in analysis so they are also removed
+equal_value <- apply(data_reduce_1, 2, function(x) max(na.omit(x)) == min(na.omit(x)))
+data_reduce<-data_reduce_1[,-which(equal_value=="TRUE")]
+
+#The dimension of secom_merge_data has been reduced to 1567*450 
+dim(data_reduce)
+
+```
+
+
+#=============================SEVERAL METHOD OF IMPUTATION==============================#
+#1)Mean:is one of the most frequently used methods. It consists of replacing the missing data for a given attribute by the mean of all known values of that variable. 
+#2)In KNN: missing values has been substitue by mean of the non-missing values
+#3)Fuzzy K-mean(FKM):is extension of KNN based on fuzzy K-means clustering
+#4)Sigular Value Decomposition(SVD): based on eigen value and performed well with the large datasets whereas its performances are deteriorated when applied on small datasets.
+#5)Bayesian Principal component Analysis (bPCA):based on eigen value
+#6)Multivaraite Imputation by Chained Equation (MICE): are based on much more complex algorithm and it's behaviour is related to the size of dataset as it produce detoriated result when applied to large dataset
+
+#After reading some Articles we observed that KNN consistently stood between the best and the worst methods. Finally, bPCA and FKM consistently lie within the best methods across the different datasets and measures of performances. Specifically, FKM outperforms all other methods when applied to the small datasets based on the UCE and SCE criteria.
+
+#=============================1) Mean Imputation ====================================#
+
+#1)Here we tried to perform mean imputation on variables and in the graph below we can see that mean imputation doesn't perform well on multivariate data.
+```{r}
+
+#1) Mean imputation
+mean_impute<-data_reduce
+for(i in 1:ncol(mean_impute)) {
+  mean_impute[ , i][is.na(mean_impute[ , i])] <- mean(mean_impute[ , i], na.rm = TRUE)
+}
+# this shows that all the NAs present in data reduced has been mean imputed
+summary(mean_impute[,100:130])
+
+#now we will observe graphs after mean imputation Density of feature 73 pre and post imputation 
+par(mfrow=c(1,2))
+{plot(density(mean_impute$Feature73), main = "Feature 73:before & after imputation")
+points(density(na.omit(data_reduce$Feature73)), lwd = 2, type = "l",col = "green")
+legend("left",c("Before Imputation", "After Imputation"),lty = 1,lwd = 2, cex=0.6,col =    c("black", "green"))
+
+plot(density(mean_impute$Feature113), main = "Feature 113:before & after imputation")
+points(density(na.omit(data_reduce$Feature113)), lwd = 2, type = "l",col = "green")
+
+legend("left",c("Before Imputation", "After Imputation"),lty = 1,lwd = 2,cex=0.6,col =    c("black", "green"))
+}
+##Now we perform univariate descriptive statistics for feature73 and 113
+#for feature73
+#1)we observe that the mean before and after imputation:150 vs 150.36 
+#2)First quartile before and after imputation: 145 vs 150.36.
+#Third quartile before and after imputation:158 vs 152.21 .
+#similar trend is visible for feature 113
+#which implies quartile are highly baised.Hence it can be concluded that it don't perform well on alot of missing value and produce a bias results
+ 
+#feature73:pre and post imputation respectively 
+round(summary(na.omit(data_reduce$Feature73), 2))
+round(summary(mean_impute$Feature73), 2)
+
+#feature113:pre and post imputation respectively 
+round(summary(na.omit(data_reduce$Feature113), 2))
+round(summary(mean_impute$Feature113), 2)
+
+#Accuracy test
+mae_mean<-mae (is.na(data_reduce$Feature73), mean_impute$Feature73)
+rmse_mean<-rmse (is.na(data_reduce$Feature73), mean_impute$Feature73)
+mape_mean<-mase (is.na(data_reduce$Feature73), mean_impute$Feature73)
+Accuracy_mean<-cbind (mae=mae_mean, rmse=rmse_mean, mape=mape_mean)
+Accuracy_mean
+
+```
+
+#===================================2) KNN =============================================#
+
+
+#Here we decided to perform KNN  where missing values has been substitue by distance between the data point and its k nearest neighbors using the Euclidean distance in multidimensional space and imputes the missing values with the weighted average of the values taken by the k nearest neighbors. 
+#We perform KNN so that we don't add up some bais results to outlier
+#knn stores all available cases and classifies new cases by a majority vote of its K neighbours.
+```{r}
+#We have applied KNN imputation to our dataset with the value of k=22 and produce the summary of thirty features. later on we have selected some feature randomly to observe variation in graphs and 1st and third quartile before and after imputation.
+knn_impute<-data_reduce
+knn_impute<-knnImputation(knn_impute,k=22)
+summary(knn_impute[,100:130])
+
+
+#In graphical representation the variation in both axis has significantly improved.
+par(mfrow=c(1,2))
+{plot(density(knn_impute$Feature73), main = "Feature73 :before & after imputation")
+points(density(na.omit(data_reduce$Feature73)), lwd = 2, type = "l",col = "green")
+legend("left",c("Before Imputation", "After Imputation"),lty = 1,lwd = 2, cex=0.6,col =    c("black", "green"))
+
+plot(density(knn_impute$Feature113), main = "Feature 113:before & after imputation")
+points(density(na.omit(data_reduce$Feature113)), lwd = 2, type = "l",col = "green")
+
+legend("left",c("Before Imputation", "After Imputation"),lty = 1,lwd = 2,cex=0.6,col =    c("black", "green"))
+}
+
+
+##Now we perform descriptive statistics for feature 73 and 113
+#for feature 73
+#1)we observe that the mean before and after imputation:150 vs 151.271 
+#2)First quartile before and after imputation: 145 vs 148.33.
+#Third quartile before and after imputation:158 vs 155.95 .
+#similar trend is visible for feature 113
+#Hence it can be concluded that KNN imputation perform well on our dataset
+
+#feature73 :pre and post imputation respectively 
+round(summary(na.omit(data_reduce$Feature73), 2))
+round(summary(knn_impute$Feature73), 2)
+
+#feature113:pre and post imputation respectively 
+round(summary(na.omit(data_reduce$Feature113), 2))
+round(summary(knn_impute$Feature113), 2)
+
+#Accuracy test of feature73 before and after imputation 
+mae_kNN<-mae(is.na(data_reduce$Feature73), knn_impute$Feature73)
+rmse_kNN<-rmse(is.na(data_reduce$Feature73), knn_impute$Feature73)
+mape_kNN<-mase(is.na(data_reduce$Feature73), knn_impute$Feature73)
+Accuracy_kNN<-cbind(mae=mae_kNN,rmse=rmse_kNN,mape=mape_kNN)
+Accuracy_kNN
+```
+#===================================3) Imputation With Median ========================#
+# Missing values have been imputed by Median
+```{r}
+median_impute<-data_reduce
+for(i in 1:ncol(median_impute)) {
+  median_impute[ , i][is.na(median_impute[ , i])] <- median(median_impute[ , i], na.rm = TRUE)
+}
+
+#accuracy test
+mae_median<-mae(is.na(data_reduce$Feature73),median_impute$Feature73)
+rmse_median<-rmse(is.na(data_reduce$Feature73),median_impute$Feature73)
+mape_median<-mase(is.na(data_reduce$Feature73),median_impute$Feature73)
+Accuracy_median<-cbind(mae=mae_median,rmse=rmse_median,mape=mape_median)
+Accuracy_median
+```
+#========================4) Imputing The Missing Values With RPART=====================#
+# This method of imputation is used when missing data is of MAR(missing at Random) type.So we create a decision tree model to predict the values of the missing data which was previously trained with the data which was already present in the dataset.
+
+```{r}
+#This method can be used to predict both numeric and factor variables. Here we are predicting a numeric variable, so we choose the method = “anova”. But we write method= “class” in case of factor variables. 
+rpart_impute<-data_reduce 
+fitrpart <- rpart(Feature73 ~     
+                    .,data=rpart_impute[!is.na(rpart_impute$Feature73),]                           ,method="anova",na.action=na.omit)
+predictrpart<- predict(fitrpart,rpart_impute[!is.na(rpart_impute$Feature73),])
+
+#accuracy pre and post imputation for feature73
+mae_rpart<-mae(is.na(rpart_impute$Feature73),predictrpart)
+rmse_rpart<-rmse(is.na(rpart_impute$Feature73),predictrpart)
+mape_rpart<-mase(is.na(rpart_impute$Feature73),predictrpart)
+Accuracy_rpart<-cbind(mae=mae_rpart,rmse=rmse_rpart,mape=mape_rpart)
+Accuracy_rpart
+
+```
+
+#======================5) Imputing The Missing Values With MICE ========================#
+#1)Multivariate Imputation via Chained Equations (MICE) is a package that uses multiple imputations for a missing data treatment.
+#2)Now, as multiple imputations create multiple predictions for each missing value; they take into account the uncertainty in the imputation and give the best standard errors.
+```{r}
+#As it took alot of time and computing power to apply missforest technique on 450 features we made a subset of the matrix and select some feature randomly to perform the imputation technique and to visualise the result
+#where m is the number of imputations
+#maxit is numberof iterations for each imputation
+#method could be 
+  #a)pmm or Bayesian Linear            regression for continuous data
+  #b)logreg for categorical data       (levels= 2)
+  #c) polyreg for categorical data     (level>=2)
+mice_impute<-subset(data_reduce,select=c("Feature17" , "Feature39" , "Feature41",  "Feature60"  ,"Feature64",  "Feature65",  "Feature66" , "Feature76" , "Feature104", "Feature122" ,"Feature124" ,"Feature133", "Feature154", "Feature204", "Feature206", "Feature268", "Feature332", "Feature342","Feature349", "Feature406" , "Feature427", "Feature442" ,"Feature478" ,"Feature540","Feature73"))
+mice_impute<-mice(mice_impute,m=10,maxit = 10, method="pmm")
+
+#imputed datset have transferred to "df"
+df<-complete(mice_impute)
+
+
+#accuracy pre and post estimation
+mae_mice<-mae(is.na(data_reduce$Feature73), df[,"Feature73"])
+rmse_mice<-rmse (is.na(data_reduce$Feature73), df[,"Feature73"])
+mape_mice<-mase (is.na(data_reduce$Feature73), df[,"Feature73"])
+Accuracy_mice<-cbind(mae=mae_mice, rmse=rmse_mice, mape=mape_mice)
+Accuracy_mice
+```
+
+#=====================6) Imputing The Missing Values With missFOREST ===================#
+#It is used particularly in case of mixed-type data.
+#can be used impute categorical and continuous data including nonlinear relations.
+#It uses the given data to train the random forest model and then uses the model to predict the missing values. It yields an out-of-bag (OOB) imputation error estimate without the need of a test set or elaborate cross-validation.
+```{r}
+#and similarly,using library mice we imputed same subset of the matrix to implement missforest imputation
+missforest_impute<-subset(data_reduce,select=c("Feature17" , "Feature39" , "Feature41",  "Feature60"  ,"Feature64",  "Feature65",  "Feature66" , "Feature76" , "Feature104", "Feature122" ,"Feature124" ,"Feature133", "Feature154", "Feature204", "Feature206", "Feature268", "Feature332", "Feature342","Feature349", "Feature406" , "Feature427", "Feature442" ,"Feature478" ,"Feature540","Feature73"))
+fitmissforest<-missForest(missforest_impute)
+df_miss<-fitmissforest$ximp
+
+#the predicted imputation of feature73
+predictmissforest<-round (df_miss [, "Feature73"], digits=1)
+
+#accuracy analysis for pre and post imputation of feature73
+mae_missforest<-mae (is.na(data_reduce$Feature73), predictmissforest)
+rmse_missforest<-rmse (is.na(data_reduce$Feature73), predictmissforest)
+mape_missforest<-mase (is.na(data_reduce$Feature73), predictmissforest)
+Accuracy_missforest<-cbind (mae=mae_missforest, rmse=rmse_missforest, mape=mape_missforest)
+Accuracy_missforest
+```
+
+#========================Graphical representation========================================
+#Creating a data frame Accuracy consisting of all the accuracy outputs of the last five methods
+#Creating a scatter plot to visualize the best method with least MAPE (Mean absolute percentage error) 
+```{r}
+Accuracy<-cbind(Methods=c("Mean","Median","rpart","kNN","mice","missForest"),
+                         rbind.data.frame(Accuracy_mean,Accuracy_median,Accuracy_rpart,
+                         Accuracy_kNN,Accuracy_mice,Accuracy_missforest))
+
+#Scatter plot of all the above mentioned imputation techniques 
+#consider the scatter plot with least MAPE (Mean absolute percentage error)  
+ggplot(data=Accuracy, aes(x=Methods, y=mape)) + geom_point()
+```
+
+
+#====================Various Feature selection Techniques================================
+#Feature selection is a crucial step in predictive modeling.
+
+#==========1)Boruta
+#the parameters used in Boruta as follows:
+#a) maxRuns: maximal number of random forest runs. we can increase this parameter if tentative attributes are left. Default is 100.
+#b)doTrace: refers to verbosity level. 0 means no tracing. 1 means reporting attribute decision as soon as it is cleared. 2 means all of 1 plus additionally reporting each iteration. Default is 0.
+#c)holdHistory: stores the full history of importance runs if set to TRUE (Default). 
+
+```{r}
+#we applied boruta feature selection technique using Library "Boruta".Boruta gives a crystal clear call on the significance of variables in a data set. In this case, out of 450 attributes, 423 are rejected and 26 are confirmed important and 1 attributes are designated as tentative. Tentative attributes have importance so close to their best shadow attributes that Boruta is not able to make a decision with the desired confidence in default number of random forest runs.Boruta performed 99 iterations in 5.35 mins.
+
+data_boruta<-knn_impute %>% 
+  as.data.frame() %>% 
+  mutate(Class=secom_merge_data$Class)
+#library(Boruta)
+set.seed(456)
+BorutaOnset<-Boruta(Class~.,data=data_boruta,doTrace=2)
+print(BorutaOnset)
+```
+
+
+
+
+#Now is the time to take decision on tentative attributes.  The tentative attributes will be classified as confirmed or rejected by comparing the median Z score of the attributes with the median Z score of the best shadow attribute.
+#Then Z score is computed. It means mean of accuracy loss divided by standard deviation of accuracy loss also known as maximum Z score among shadow attributes (MZSA)
+#when tentative attributr have importance significantly lower than MZSA. Then we permanently remove them from the process and tag them 'unimportant'
+#otherwise tag them  as 'important'  when they have importance significantly higher than MZSA
+```{r}
+#now the final decision over the tentative attributes have be taken and it can be seen that now we have 27 confirmed 'important' (including response) and 426 confirmed 'unimportant'
+final_boruta_decision <- TentativeRoughFix(BorutaOnset)
+print(final_boruta_decision)
+
+
+#the list of all the confirmed "important " attributes
+getSelectedAttributes(final_boruta_decision, withTentative = F)
+
+
+```
+
+#here we got 28 features for model prediction 
+```{r}
+#summary of decision of boruta algorithm as 'rejected' or 'Confirmed'
+boruta.df <- attStats(final_boruta_decision)
+print(boruta.df)
+#list of all the 10 attribute confirmed using boruta 
+boruta_confirmed<-data.frame(getSelectedAttributes(final_boruta_decision, withTentative = F))
+
+#subset of all the "confirmed attributes" have been combined together
+boruta_final<-subset(data_boruta,select=c(
+"Feature39"  ,"Feature41"  ,"Feature60"  ,"Feature65"  ,"Feature66"  ,"Feature104",
+"Feature122" ,"Feature124" ,"Feature133" ,"Feature154" ,"Feature198" ,"Feature206",
+"Feature211" ,"Feature268" ,"Feature333" ,"Feature334" ,"Feature340" ,"Feature342",
+"Feature349" ,"Feature427" ,"Feature442" ,"Feature474" ,"Feature476" ,"Feature478",
+"Feature511" ,"Feature540" ,"Feature563","Class"))
+
+dim(boruta_final)
+head(boruta_final)
+
+```
+
+
+```{r}
+## Train-Test split :The entire dataset is split into train set containing 80% of data and test set containing 20% of data 
+attach(boruta_final)
+set.seed(65)
+train<-sample(1:nrow(boruta_final),nrow(boruta_final)*.80)
+train_b<-boruta_final[train,]
+test_b<-boruta_final[-train,]
+
+#unbalanced data refers to classification problems where we have unequal instances for different classes. Having unbalanced data is actually very common in general, but it is especially prevalent when working with crucial data where we usually have more pass cases than fail cases. we are trying to have a look on the summary of unbalanced dataset. 
+
+#summary(boruta_final$Class)
+print("The pass and Fail cases originally ")
+summary(train_b$Class)
+
+## As the data we have unbalanced dataset and there are chances that this unbalanced dataset will bias the prediction model towards the more common class!.
+#so we are trying to Oversample Minority class(Fail) and Undersample majority class(Pass)
+set.seed(100)
+
+#we have checked the balancing of data using SMOTE (Sythetic Minority Oversampling Technique) and ROSE (Randomly Over Sampling Examples) and found that ROSE do better balancing then SMOTE
+
+#calculating F1 score and ROC curve using SMOTE
+data_rose_b <- ROSE(Class ~ ., data = train_b, seed = 1)$data
+# ROC curve of ROSE sampling data
+# Predicting the test set using ROSE classifier
+rose_classifier<- glm(formula = Class ~ ., family = binomial, data = data_rose_b)
+rose_probability_predict <- predict(rose_classifier, type = 'response', newdata = test_b[-28])
+pred_rose <- ifelse(rose_probability_predict>0.5, -1, 1)
+test_rose<-ifelse(test_b[, 28]=="pass",-1,1)
+#roc curve of ROSE balancing
+roc.curve(test_rose, pred_rose,curve = TRUE)
+#confusion matrix and F-score 
+confusionMatrix(table(test_rose, pred_rose))
+cat("F1 score: ",F1_Score(test_rose, pred_rose),"\n")
+
+
+#Similarly calculating F1 score and ROC curve using SMOTE
+data_smote_b<-SMOTE(Class ~ ., data=train_b, perc.over = 100, perc.under=400)
+# Predicting the test set using SMOTE classifier
+smote_classifier<- glm(formula = Class ~ ., family = binomial, data = data_smote_b)
+smote_probability_predict<-predict(smote_classifier, type = 'response', newdata = test_b[-28])
+pred_smote = ifelse(smote_probability_predict>0.5, -1, 1)
+test_smote<-ifelse(test_b[, 28]=="pass",-1,1)
+#roc curve of SMOTE balancing
+roc.curve(test_smote,pred_smote,curve = TRUE)
+#confusion matrix and F-score
+confusionMatrix(table(test_smote, pred_smote))
+cat("F1 score: ",F1_Score(test_smote, pred_smote),"\n")
+
+#ROC and AUC for Comparison of Classifiers
+# ROC curve is a potentially powerful metric for comparison of different classifiers.
+#1) ROC is invariant against class skew of the applied data set – that means a data set featuring 60% positive labels will yield the same (statistically expected) ROC as a data set featuring 45% positive labels (though this will affect the cost associated with a given point of the ROC). 
+#2)The other is that the ROC is invariant against the evaluated score – which means that we could compare a model giving non-calibrated scores like a regular linear regression with a logistic regression or a random forest model whose scores can be considered as class probabilities.
+roc.curve(test_smote,pred_smote,curve = TRUE)
+auc(test_smote,pred_smote)
+
+#roc curve
+pred2 <- prediction(test_smote, pred_smote)
+perf2 <- performance(pred2,"tpr","fpr")
+plot(perf2)
+
+
+```
+
+#============== 1.1.Model prediction using selected features of Boruta==================== #here we are using different methods for model prediction like
+#a)Random Forest              f)Naive Bayes
+#b)Tree Pruning               g)SVM radial
+#c)Desicion Tree              h)SVM Polynomial
+#d)Bagging                    i)SVM Linear
+#e)boosting                   j)LDA
+#f)Knn                        l)Logistic regression
+
+#a)Random Forest
+#works similar like decision tree but has thausands of tree and train each tree with different set of observation.the final prediction are made by averagingprediction of each individual tree.
+
+```{r}
+## Random Forest
+#the default random forest performs 500 trees and provides an OOB(Out Of Bag) estimate of error rate =5.83%
+set.seed(133)
+rf.finaldata_b<-randomForest(Class~., data=train_b,mtry=10,ntree=5,importance=TRUE)
+
+# it is a difficult task to analyse which attribute should be considered at root node so we uses information gain graph and Gini plot with which we can select the attribute with more information gain as root node.
+
+#for clear visualisation of  information gain and gini plot features we selected only 10 feature.
+varImpPlot(rf.finaldata_b, sort=TRUE, n.var=min(15, nrow(rf.finaldata_b$importance)),               type=NULL, class=NULL,main=deparse(substitute(rf.finaldata_b)))
+# Predicting test set results 
+rf.pred_b<-predict(rf.finaldata_b,test_b,type="class")
+confusionMatrix(table(rf.pred_b,test_b$Class))
+cat("F1 score: ",F1_Score(test_b$Class,rf.pred_b),"\n")
+
+
+```
+### FOR DECISION TREE IT IS REQUESTED TO USE R VERSION 3.6 AS 3.5 DON'T HAVE LIBRARY TREE
+
+
+#b) Fitting Decision Tree
+#Decision tree is a supervised algorithm which is used for both classification and regression
+#Decision tree works for both continuos and categorical variable.
+# pros:easy to explain, closely mirror human decision making comparison to other regression,can be graphically represented and so easy to handle qualitative predictors without need to create dummy variable.
+#cons: highly baised result as the variance is very high.
+```{r}
+set.seed(1)
+tree.finaldata_b=tree(Class~.,data=data_rose_b)
+summary(tree.finaldata_b)
+
+# Plotting the tree so the root node will be the one that has high information gain.
+plot(tree.finaldata_b)
+text(tree.finaldata_b,pretty=0)
+
+# Predicting test set results
+#prp(tree.finaldata_b$frame,box.palette = "Reds",tweak = 1.2)
+tree.pred_b=predict(tree.finaldata_b,test_b,type="class")
+table(tree.pred_b,test_b$Class)
+mean(tree.pred_b==test_b$Class)
+mean(tree.pred_b!=test_b$Class)
+
+```
+
+#c) Tree Pruning
+#it basically helpful to reduce the size of decision tree and avoid overfitting.
+```{r}
+# Applying Cross Validation to find the optimal tree size
+set.seed(1)
+cv.finaldata_b=cv.tree(tree.finaldata_b,FUN=prune.misclass)
+plot(cv.finaldata_b$size,cv.finaldata_b$dev,type="b")
+
+# Fitting and plotting pruned tree
+prune.finaldata_b=prune.misclass(tree.finaldata_b,best=16)
+summary(prune.finaldata_b)
+plot(prune.finaldata_b)
+text(prune.finaldata_b,pretty=0)
+
+# Predicting test set results using pruned tree
+prunetree.pred_b=predict(prune.finaldata_b,test_b,type="class")
+table(prunetree.pred_b,test_b$Class)
+mean(prunetree.pred_b==test_b$Class)
+mean(prunetree.pred_b!=test_b$Class)
+
+```
+
+
+
+#d)Bagging    
+#Bagging and boosting helps to reduce variance 
+#in Bagging (bootstarp aggregating) we extract random feature with replacement in different bags(subset of dataset) where "number in a bags" is always less than "number of instances" usually 60%.
+#Further these different bags are used to train different model then the Prediction is given based on the aggregation of predictions from all the models.
+#so in bagging each model run independently and then aggregate the outputs at the end without preference to any model.
+```{r}
+#Bagging
+set.seed(168)
+bag.finaldata_b<-randomForest(Class~., data=train_b,mtry=10,ntree=5,importance=TRUE)
+varImpPlot(bag.finaldata_b,sort=TRUE, n.var=min(10, nrow(bag.finaldata_b$importance)),               type=NULL, class=NULL,main=deparse(substitute(bag.finaldata_b)))
+
+# Predicting test set results
+bag.pred_b<-predict(bag.finaldata_b,test_b,type="class")
+table(bag.pred_b,test_b$Class)
+mean(bag.pred_b==test_b$Class)
+mean(bag.pred_b!=test_b$Class)
+```
+#e)boosting  
+#like bagging and randomforest, it is general approach that can be applied to many statistical learning methods for regression and classification.
+#as we know bagging involves creation of multiple copies of original training dataset using bootstrap and then fit a separate decision tree to each copy and then combine all tree in order to create a single predictive model. so each tree built on bootstrapped dataset independent of other tree.
+#Boosting works in similar way EXCEPT Boosting is all about “teamwork”. Each model that runs, dictates what features the next model will focus on. Tree in it are grown sequentially and each grown tree uses the information of previously grown tree.
+#it doesn't involve bootstrap sampling and hence each tree is fitted on modified version of original dataset.
+```{r}
+## Boosting
+# Data pre-processing
+Yield.boosttrain_b<-ifelse(data_rose_b$Class=="pass",1,0)
+Yield.boosttest_b<-ifelse(test_b$Class=="pass",1,0)
+data.boosttrain_b<-data.frame(data_rose_b,Yield.boosttrain_b)
+data.boosttest_b<-data.frame(test_b,Yield.boosttest_b)
+
+# Fitting boosting algorithm
+set.seed(100)
+boost.finaldata_b<-gbm(Yield.boosttrain_b~.-Class,data=data.boosttrain_b,distribution="bernoulli",n.trees=100,interaction.depth=4)
+summary(boost.finaldata_b)
+
+# Predicting test set results
+boost.prob_b<-predict(boost.finaldata_b,newdata=data.boosttest_b,type="response",n.trees=100)
+boost.pred_b<-rep("0",nrow(data.boosttest_b))
+boost.pred_b[boost.prob_b>=0.665]="1"
+table(boost.pred_b,Yield.boosttest_b)
+mean(boost.pred_b==Yield.boosttest_b)
+mean(boost.pred_b!=Yield.boosttest_b)
+```
+#f)Knn
+#k nearest neighbors is a simple algorithm that stores all available cases and classifies new cases by a majority vote of its k neighbors. This algorithms segregates unlabeled data points into well defined groups.
+#pros:The algorithm is highly unbiased in nature and makes no prior assumption of the underlying data,the training process is really fast
+#cons: the prediction time is pretty high 
+```{r}
+## kNN
+# Data pre-processing
+train.x_b<-data_rose_b[,1:28]
+yield.train.knn_b<-data_rose_b$Class
+test.x_b=test_b[,1:28]
+
+# Fitting kNN algorithm
+set.seed(10)
+knn.pred_b<-knn(train.x_b[,-28],test.x_b[,-28],yield.train.knn_b,k=5)
+table(knn.pred_b,test_b$Class)
+print(mean(knn.pred_b==test_b$Class))
+
+```
+#g)Naive Bayes
+#it is based on bayes theorem and widely used in classification purposes.It assumes that all the features are unrelated to each other. 
+```{r}
+set.seed(1)
+naive.fit_b<-naiveBayes(Class~.,data=train_b)
+summary(naive.fit_b)
+
+# Predicting test set results
+naive.pred_b<-predict(naive.fit_b,test_b)
+table(naive.pred_b,test_b$Class)
+mean(naive.pred_b==test_b$Class)
+mean(naive.pred_b!=test_b$Class)
+
+```
+#h)SVM radial
+#Support vector machines (SVM) are classification technique which does not use any sort of probabilistic model like any other classifier but simply generates hyperplanes or simply putting lines, to separate and classify the data in some feature space into different regions.
+#these hyper plane could be linear, radial or ploynomial as we can see below we used different kernels to estimate the accuracy. 
+```{r}
+# SVM-Radial
+#library(e1071) is used for SVM radial
+# Tuning to obtain the best parameter estimates
+tune.out_b<-tune(svm,Class~.,data=data_rose_b,kernel="radial",ranges=list(cost=c(0.001,0.01,0.1,1,5,10,100),gamma=c(0.001,0.01,0.1,1,5,10,100)))
+summary(tune.out_b)
+
+# Fitting SVM-Radial
+radial.svmfit_b<-svm(Class~.,data=data_rose_b,kernel="radial",cost=5,gamma=.01)
+
+# Predicting test set result
+radial.pred_b<-predict(radial.svmfit_b,test_b)
+table(radial.pred_b, test_b$Class)
+mean(radial.pred_b==test_b$Class)
+mean(radial.pred_b!=test_b$Class)
+
+```
+#i)SVM Polynomial
+```{r}
+# SVM-Polynomial
+# Tuning to obtain the best parameter estimates
+tune.out_b<-tune(svm,Class~.,data=data_rose_b,kernel="polynomial",ranges=list(cost=c(0.001,0.01,0.1,1,5,10,100),degree=c(1,2,3,4,5)))
+summary(tune.out_b)
+
+# Fitting SVM-Polynomial
+poly.svmfit_b<-svm(Class~.,data=data_rose_b,kernel="polynomial",cost=10,degree=3)
+
+# Predicting test set results
+poly.pred_b<-predict(poly.svmfit_b,test_b)
+table(poly.pred_b,test_b$Class)
+mean(poly.pred_b==test_b$Class)
+mean(poly.pred_b!=test_b$Class)
+```
+#j)SVM Linear
+```{r}
+#SVM-Linear
+# Tuning to obtain the best parameter estimates
+tune.out_b<-tune(svm,Class~.,data=data_rose_b,kernel="linear",ranges=list(cost=c(0.1,1,5,10,100)))
+summary(tune.out_b)
+
+# Fitting SVM-Linear
+linear.svmfit_b<-svm(Class~.,data=data_rose_b,kernel="linear",cost=1)
+summary(linear.svmfit_b)
+
+# Predicting test set results
+linear.pred_b<-predict(linear.svmfit_b, test_b)
+table(linear.pred_b, test_b$Class)
+mean(linear.pred_b==test_b$Class)
+mean(linear.pred_b!=test_b$Class)
+```
+#k)LDA
+#Linear discriminant Analysis(LDA):If you have more than two classes then LDA is the preferred linear classification technique.
+#LDA makes some simplifying assumptions about your data:data is Gaussian and each attribute has the same variance
+#With these assumptions, the LDA model estimates the mean and variance from your data for each class. 
+```{r}
+#LDA uses library "MASS"
+set.seed(1)
+lda.fit_b<-lda(Class~.,data=data_rose_b)
+summary(lda.fit_b)
+
+# Predicting test set results
+lda.pred_b<-predict(lda.fit_b,test_b)
+lda.class_b=lda.pred_b$class
+table(lda.class_b,test_b$Class)
+mean(lda.class_b==test_b$Class)
+mean(lda.class_b!=test_b$Class)
+
+```
+# l)Logistic regression
+#Logistic regression is a classification algorithm traditionally limited to only two-class classification problems.
+#cons:Unstable With Well Separated Classes,Unstable With Few Examples.
+```{r}
+#Logistic Regression uses library MASS and glmnet
+set.seed(100)
+logistic.fit_b<-glm(Class~.,data=data_rose_b,family = "binomial",method = "glm.fit")
+summary(logistic.fit_b)
+
+# Analyzing VIF
+vif(logistic.fit_b)
+
+# Fitting Logistic Regression model after eliminating Features with VIF values greater than 5 
+set.seed(100)
+logistic.fit_b<-glm(Class~., 
+                 data=data_rose_b,family = binomial)
+summary(logistic.fit_b)
+
+# Predicting test set results
+logistic.probs_b<-predict(logistic.fit_b,test_b, type="response")
+logistic.pred_b<-rep("Fail",314)
+logistic.pred_b[logistic.probs_b>0.63]<-"Pass"
+table(logistic.pred_b, test_b$Class)
+mean(logistic.pred_b==test_b$Class)
+mean(logistic.pred_b!=test_b$Class)
+```
+
+
+
+
+#==========2)Principal Component Analysis
+#after applying PCA selection Technique, we found that 100 feature are of more importance. so we if will use this techniques we will build a model with most accuracy from these 100 feature
+```{r}
+# Fitting Principal Components
+pr.out<-prcomp(knn_impute,scale=TRUE)
+summary(pr.out)
+pr.var<-pr.out$sdev^2
+pve<-pr.var/sum(pr.var)
+plot(cumsum(pve), col="green", xlab="Principal Component",ylab="Cumulative Proportion of Variance Explained",ylim=c(0,1),type="b")
+
+# First 100 Principal Components which explain about 80% of the variation are selected for further analysis
+loading_pca <- as.data.frame(pr.out$rotation[,1:100])
+dim(loading_pca)
+```
+
+```{r}
+data_pca<-as.data.frame(pr.out$x[,1:100])%>% 
+  as.data.frame() %>% 
+  mutate(Class=secom_merge_data$Class)
+head(data_pca)
+
+# The entire dataset is split into train set containing 80% of data and test set containing 20% of data 
+set.seed(65)
+train<-sample(1:nrow(data_pca),nrow(data_pca)*0.80)
+train.data<-data_pca[train,]
+test.data<-data_pca[-train,]
+dim(train.data)
+dim(test.data)
+
+## Applying SMOTE function to Oversample Minority class(Fail) and Undersample majority class(Pass) we used DMwr package
+summary(train.data$Class)
+set.seed(60)
+#using ROSE
+data_rose_pca <- ROSE(Class ~ ., data = train.data, seed = 1)$data
+table(data_rose_pca$Class)
+
+```
+
+#================= 2.1.Model prediction using selected features of PCA==================== #here we are using different methods for model prediction like
+#a)Desicion Tree              f)Naive Bayes
+#b)Tree Pruning               g)SVM radial
+#c)Random Forest              h)SVM Polynomial
+#d)Bagging                    i)SVM Linear
+#e)boosting                   j)LDA
+#f)Knn                        l)Logistic regression
+
+#a) Fitting Decision Tree
+```{r}
+
+set.seed(1)
+tree.finaldata_pca=tree(Class~.,data=data_rose_pca)
+summary(tree.finaldata_pca)
+
+# Plotting the tree
+plot(tree.finaldata_pca)
+text(tree.finaldata_pca,pretty=0)
+
+# Predicting test set results
+tree.pred_pca=predict(tree.finaldata_pca,test.data,type="class")
+table(tree.pred_pca,test.data$Class)
+mean(tree.pred_pca==test.data$Class)
+mean(tree.pred_pca!=test.data$Class)
+```
+
+#b)Tree Pruning
+
+```{r}
+# Applying Cross Validation to find the optimal tree size
+set.seed(1)
+cv.finaldata_pca=cv.tree(tree.finaldata_pca,FUN=prune.misclass)
+plot(cv.finaldata_pca$size,cv.finaldata_pca$dev,type="b")
+
+# Fitting and plotting pruned tree
+prune.finaldata_pca=prune.misclass(tree.finaldata_pca,best=16)
+summary(prune.finaldata_pca)
+plot(prune.finaldata_pca)
+text(prune.finaldata_pca,pretty=0)
+
+# Predicting test set results using pruned tree
+prunetree.pred_pca=predict(prune.finaldata_pca,test.data,type="class")
+table(prunetree.pred_pca,test.data$Class)
+mean(prunetree.pred_pca==test.data$Class)
+mean(prunetree.pred_pca!=test.data$Class)
+
+```
+
+
+
+#c)Random Forest 
+```{r}
+## Random Forest
+#install.packages("randomForest")
+#library(randomForest)
+set.seed(133)
+rf.finaldata<-randomForest(Class~., data=train.data,mtry=10,ntree=5,importance=TRUE)
+varImpPlot(rf.finaldata,sort=TRUE, n.var=min(10, nrow(rf.finaldata$importance)),               type=NULL, class=NULL,main=deparse(substitute(rf.finaldata)))
+
+# Predicting test set results 
+rf.pred=predict(rf.finaldata,test.data,type="class")
+table(rf.pred,test.data$Class)
+mean(rf.pred==test.data$Class)
+mean(rf.pred!=test.data$Class)
+```
+#d)Bagging                  
+```{r}
+#Bagging
+set.seed(168)
+bag.finaldata<-randomForest(Class~., data=train.data,mtry=100,ntree=5,importance=TRUE)
+varImpPlot(bag.finaldata,sort=TRUE, n.var=min(10, nrow(bag.finaldata$importance)),               type=NULL, class=NULL,main=deparse(substitute(bag.finaldata)))
+
+# Predicting test set results
+bag.pred<-predict(bag.finaldata,test.data,type="class")
+table(bag.pred,test.data$Class)
+mean(bag.pred==test.data$Class)
+mean(bag.pred!=test.data$Class)
+```
+#e)boosting  
+```{r}
+## Boosting
+# Data pre-processing
+Yield.boosttrain<-ifelse(data_rose_pca$Class=="pass",1,0)
+Yield.boosttest<-ifelse(test.data$Class=="pass",1,0)
+data.boosttrain<-data.frame(data_rose_pca,Yield.boosttrain)
+data.boosttest<-data.frame(test.data [,1:100],Yield.boosttest)
+
+# Fitting boosting algorithm
+#install.packages("gbm")
+#library(gbm)
+set.seed(100)
+boost.finaldata<-gbm(Yield.boosttrain~.-Class,data=data.boosttrain,distribution="bernoulli",n.trees=100,interaction.depth=4)
+summary(boost.finaldata)
+
+# Predicting test set results
+boost.prob<-predict(boost.finaldata,newdata=data.boosttest,type="response",n.trees=100)
+boost.pred<-rep("0",nrow(data.boosttest))
+boost.pred[boost.prob>=0.665]="1"
+table(boost.pred,Yield.boosttest)
+mean(boost.pred==Yield.boosttest)
+mean(boost.pred!=Yield.boosttest)
+```
+#f)Knn
+```{r}
+## kNN
+# Data pre-processing
+train.x<- data_rose_pca[,1:100]
+yield.train.knn<-data_rose_pca$Class
+test.x<-test.data[,1:100]
+
+# Fitting kNN algorithm
+#install.packages("class")
+set.seed(10)
+knn.pred<-knn(train.x,test.x,yield.train.knn,k=129)
+table(knn.pred,test.data$Class)
+print(mean(knn.pred==test.data$Class))
+
+```
+#g)Naive Bayes
+```{r}
+set.seed(1)
+naive.fit<-naiveBayes(Class~.,data=train.data)
+summary(naive.fit)
+
+# Predicting test set results
+naive.pred=predict(naive.fit,test.data)
+table(naive.pred,test.data$Class)
+mean(naive.pred==test.data$Class)
+mean(naive.pred!=test.data$Class)
+
+```
+#h)SVM radial
+```{r}
+# SVM-Radial
+#library(e1071) is used for SVM radial
+# Tuning to obtain the best parameter estimates
+tune.out<-tune(svm,Class~.,data=data_rose_pca,kernel="radial",ranges=list(cost=c(0.001,0.01,0.1,1,5,10,100),gamma=c(0.001,0.01,0.1,1,5,10,100)))
+summary(tune.out)
+
+# Fitting SVM-Radial
+radial.svmfit<-svm(Class~.,data=data_rose_pca,kernel="radial",cost=5,gamma=.01)
+
+# Predicting test set results
+radial.pred<-predict(radial.svmfit,test.data)
+table(radial.pred, test.data$Class)
+mean(radial.pred==test.data$Class)
+mean(radial.pred!=test.data$Class)
+
+```
+#i)SVM Polynomial
+```{r}
+# SVM-Polynomial
+# Tuning to obtain the best parameter estimates
+tune.out<-tune(svm,Class~.,data=data_rose_pca,kernel="polynomial",ranges=list(cost=c(0.001,0.01,0.1,1,5,10,100),degree=c(1,2,3,4,5)))
+summary(tune.out)
+
+# Fitting SVM-Polynomial
+poly.svmfit<-svm(Class~.,data=data_rose_pca,kernel="polynomial",cost=10,degree=3)
+
+# Predicting test set results
+poly.pred=predict(poly.svmfit,test.data)
+table(poly.pred,test.data$Class)
+mean(poly.pred==test.data$Class)
+mean(poly.pred!=test.data$Class)
+```
+#j)SVM Linear
+```{r}
+#SVM-Linear
+# Tuning to obtain the best parameter estimates
+tune.out<-tune(svm,Class~.,data=data_rose_pca,kernel="linear",ranges=list(cost=c(0.1,1,5,10,100)))
+summary(tune.out)
+
+# Fitting SVM-Linear
+linear.svmfit<-svm(Class~.,data=data_rose_pca,kernel="linear",cost=1)
+summary(linear.svmfit)
+
+# Predicting test set results
+linear.pred<-predict(linear.svmfit, test.data)
+table(linear.pred, test.data$Class)
+mean(linear.pred==test.data$Class)
+mean(linear.pred!=test.data$Class)
+```
+#k)LDA
+```{r}
+#LDA uses library "MASS"
+#install.packages("MASS")
+set.seed(1)
+lda.fit<-lda(Class~.,data=data_rose_pca)
+summary(lda.fit)
+
+# Predicting test set results
+lda.pred<-predict(lda.fit,test.data)
+lda.class<-lda.pred$class
+table(lda.class,test.data$Class)
+mean(lda.class==test.data$Class)
+mean(lda.class!=test.data$Class)
+
+```
+#l)Logistic regression
+```{r}
+#Logistic Regression uses library MASS and glmnet
+set.seed(100)
+logistic.fit=glm(Class~.,data=data_rose_pca,family = "binomial",method = "glm.fit")
+summary(logistic.fit)
+
+# Analyzing VIF
+vif(logistic.fit)
+
+# Fitting Logistic Regression model after eliminating PCs with VIF values greater than 5 
+set.seed(100)
+logistic.fit=glm(Class~., data=data_rose_pca,family = binomial)
+summary(logistic.fit)
+
+# Predicting test set results
+logistic.probs=predict(logistic.fit,test.data, type="response")
+logistic.pred=rep("Fail",314)
+logistic.pred[logistic.probs>0.63]="Pass"
+table(logistic.pred, test.data$Class)
+mean(logistic.pred==test.data$Class)
+mean(logistic.pred!=test.data$Class)
+```
+
+#==========3)Lasso Regression
+#since the data we have is highly dimensional so we tried to apply lasso regression to select important feature
+```{r}
+#Lasso variable is created which has all Features as data_reduce to which  column "Class" added
+
+lasso<-data_reduce %>% 
+  as.data.frame() %>% 
+  mutate(Class=secom_merge_data$Class)
+
+#using knn imputation technique to impute the newly created lasso variable in knn_impute_l
+knn_impute_l<-lasso
+knn_impute_l<-knnImputation(lasso)
+
+# further data has been divided into train and test set for further analysis
+set.seed(2)
+index <- sample(1:nrow(knn_impute_l), nrow(knn_impute_l)/20)
+train_l<- knn_impute_l[-index,]
+test_l <- knn_impute_l[index,]
+
+#since the data we have is unbalanced so we generated sysnthetic data  using Randomly Over Sampling Examples (ROSE)
+#pass and fail cases before balancing the dataset
+summary(train_l$Class)
+#pass and fail cases after balancing using ROSE
+data_rose_l <- ROSE(Class ~ ., data = train_l, seed = 1)$data
+table(data_rose_l$Class)
+
+```
+#First figure below (at left) shows that with higher lamda, coefficient of each feature shrinks
+#In order to choose a proper penalty, we applied cross validation to find out which lambda gave us less missclassification error (ME). The second figure(at right) shows that the model gives the smallest ME when the cofficient of features shrink about to 140. Thus, if we use this techniquewe are going to select these 140 features to construct the classification model.
+```{r}
+par(mfrow=c(1,2))
+{fit_LS <- glmnet(as.matrix(data_rose_l[,-451]), data_rose_l[,451], family="binomial", alpha=1)
+plot_glmnet(fit_LS, "lambda", label=5)
+
+fit_LS_cv <- cv.glmnet(as.matrix(data_rose_l[,-451]), as.matrix(as.numeric(data_rose_l[,451])-451), type.measure="class", family="binomial", alpha=1)
+plot(fit_LS_cv)
+}
+
+coef <- coef(fit_LS_cv, s = "lambda.min")
+coef_df <- as.data.frame(as.matrix(coef))
+index_LS <- rownames(coef_df)[which(coef_df[,1] != 0)][-1]
+```
+
+#========= 3.1.Model prediction using selected features of Lasso Regression=============== #here we are using different methods for model prediction like
+#a)Desicion Tree              f)Naive Bayes
+#b)Tree Pruning               g)SVM radial
+#c)Random Forest              h)SVM Polynomial
+#d)Bagging                    i)SVM Linear
+#e)boosting                   j)LDA
+#f)Knn                        l)Logistic regression
+
+#a) Fitting Decision Tree
+```{r}
+
+set.seed(1)
+tree.finaldata_l=tree(Class~.,data=data_rose_l)
+summary(tree.finaldata_l)
+
+# Plotting the tree
+plot(tree.finaldata_l)
+text(tree.finaldata_l,pretty=0)
+
+# Predicting test set results
+tree.pred_l=predict(tree.finaldata_l,test_l,type="class")
+table(tree.pred_l,test_l$Class)
+mean(tree.pred_l==test_l$Class)
+mean(tree.pred_l!=test_l$Class)
+```
+
+#b) Tree Pruning
+```{r}
+# Applying Cross Validation to find the optimal tree size
+set.seed(1)
+cv.finaldata_l=cv.tree(tree.finaldata_l,FUN=prune.misclass)
+plot(cv.finaldata_l$size,cv.finaldata_l$dev,type="b")
+
+# Fitting and plotting pruned tree
+prune.finaldata_l=prune.misclass(tree.finaldata_l,best=16)
+summary(prune.finaldata_l)
+plot(prune.finaldata_l)
+text(prune.finaldata_l,pretty=0)
+
+# Predicting test set results using pruned tree
+prunetree.pred_l=predict(prune.finaldata_l,test_l,type="class")
+table(prunetree.pred_l,test_l$Class)
+mean(prunetree.pred_l==test_l$Class)
+mean(prunetree.pred_l!=test_l$Class)
+
+```
+
+
+#c)Random Forest 
+```{r}
+## Random Forest
+set.seed(133)
+rf.finaldata_l<-randomForest(Class~., data=train_l,mtry=10,ntree=5,importance=TRUE)
+
+#The left side graph shows that if a variable is assigned values by random permutation then how much will the MSE increase. 
+
+#On the other hand, Node purity is measured by Gini Index(right side graph) which is the the difference between RSS before and after the split on that variable.Since the concept of criteria of variable importance is different in two cases, we have different rankings for different variables.
+#There is no fixed criterion to select the “best” measure of variable importance it depends on the problem you have at hand.
+
+#GINI importance measures the average gain of purity by splits of a given variable. If the variable is useful, it tends to split mixed labeled nodes into pure single class nodes. Splitting by a permuted variables tend neither to increase nor decrease node purities. Permuting a useful variable, tend to give relatively large decrease in mean gini-gain. GINI importance is closely related to the local decision function, that random forest uses to select the best available split.
+varImpPlot(rf.finaldata_l,sort=TRUE, n.var=min(10, nrow(rf.finaldata_l$importance)),               type=NULL, class=NULL,main=deparse(substitute(rf.finaldata_l)))
+
+
+# Predicting test set results 
+rf.pred_l<-predict(rf.finaldata_l,test_l,type="class")
+confusionMatrix(table(rf.pred_l,test_l$Class))
+cat("F1 score: ",F1_Score(rf.pred_l,test_l$Class),"\n")
+mean(rf.pred_l==test_l$Class)
+mean(rf.pred_l!=test_l$Class)
+
+
+
+
+#ROC and AUC for Comparison of Classifiers
+# ROC curve is a potentially powerful metric for comparison of different classifiers.
+#1) ROC is invariant against class skew of the applied data set – that means a data set featuring 60% positive labels will yield the same (statistically expected) ROC as a data set featuring 45% positive labels (though this will affect the cost associated with a given point of the ROC). 
+#2)The other is that the ROC is invariant against the evaluated score – which means that we could compare a model giving non-calibrated scores like a regular linear regression with a logistic regression or a random forest model whose scores can be considered as class probabilities.
+roc.curve(rf.pred_l,test_l$Class,curve = TRUE)
+
+#roc curve
+pred_l<-ifelse(rf.pred_l=="pass",-1,1)
+test_l<-ifelse(test_l[, 451]=="pass",-1,1)
+pred2_l <- prediction(pred_l,test_l)
+perf2_l <- performance(pred2_l,"tpr","fpr")
+plot(perf2_l)
+
+```
+#d)Bagging                  
+```{r}
+#Bagging
+set.seed(168)
+bag.finaldata_l<-randomForest(Class~., data=train_l,mtry=100,ntree=5,importance=TRUE)
+varImpPlot(bag.finaldata_l,sort=TRUE, n.var=min(10, nrow(bag.finaldata_l$importance)),               type=NULL, class=NULL,main=deparse(substitute(bag.finaldata_l)))
+
+
+# Predicting test set results
+bag.pred_l=predict(bag.finaldata_l,test_l,type="class")
+table(bag.pred_l,test_l$Class)
+mean(bag.pred_l==test_l$Class)
+mean(bag.pred_l!=test_l$Class)
+```
+#e)boosting  
+```{r}
+# Boosting
+params <- list(
+  "objective"           = "reg:logistic",
+  "eval_metric"         = "logloss",
+  "eta"                 = 0.1,
+  "max_depth"           = 3,
+  "min_child_weight"    = 10,
+  "gamma"               = 0.70,
+  "subsample"           = 0.76,
+  "colsample_bytree"    = 0.95,
+  "alpha"               = 2e-05,
+  "lambda"              = 10
+)
+X <- xgb.DMatrix(as.matrix(train_l %>% dplyr::select(-Class)), label =                
+                          as.numeric(train_l$Class)-1)
+fit_GBM_l <- xgboost(data = X, params = params, nrounds = 50, verbose = 0)
+importance <- xgb.importance(colnames(train_l), model = fit_GBM_l)
+xgb.plot.importance(importance[1:10])
+
+Y <- xgb.DMatrix(as.matrix(test_l %>% dplyr:: select(-Class)))
+pred_GBM_l <- factor(ifelse(predict(fit_GBM_l, Y) > 0.07, "fail", "pass"), levels = c("pass", "fail"))
+table(test_l$Class, pred_GBM_l)
+#Area under the curve
+roc.curve(test_l$Class, predict(fit_GBM_l, Y))
+
+```
+#f)Knn
+```{r}
+## kNN
+# Data pre-processing
+train.x_l<-data_rose_l[,1:25]
+yield.train.knn_l<-data_rose_l$Class
+test.x_l<-test_l[,1:25]
+
+# Fitting kNN algorithm
+#install.packages("class")
+library(class)
+set.seed(10)
+knn.pred_l<-knn(train.x_l[,-25],test.x_l[,-25],yield.train.knn_l,k=5)
+table(knn.pred_l,test_l$Class)
+print(mean(knn.pred_l==test_l$Class))
+
+```
+#g)Naive Bayes
+```{r}
+set.seed(1)
+naive.fit_l<-naiveBayes(Class~.,data=train_l)
+summary(naive.fit_l)
+
+# Predicting test set results
+naive.pred_l<-predict(naive.fit_l,test_l)
+table(naive.pred_l,test_l$Class)
+mean(naive.pred_l==test_l$Class)
+mean(naive.pred_l!=test_l$Class)
+
+```
+#h)SVM radial
+```{r}
+# Tuning to obtain the best parameter estimates
+tune.out_l<-tune(svm,Class~.,data=data_rose_l[,c("Class",index_LS)],kernel="radial")
+summary(tune.out_l)
+
+# Fitting SVM-Radial
+radial.svmfit_l<-svm(Class~.,data=data_rose_l,kernel="radial",cost=5,gamma=.01)
+
+# Predicting test set result
+radial.pred_l<-predict(radial.svmfit_l,test_l)
+table(radial.pred_l, test_l$Class)
+mean(radial.pred_l==test_l$Class)
+mean(radial.pred_l!=test_l$Class)
+
+```
+#i)SVM Polynomial
+```{r}
+# SVM-Polynomial
+# Tuning to obtain the best parameter estimates
+tune.out_l<-tune(svm,Class~.,data=data_rose_l[,c("Class",index_LS)],kernel="polynomial")
+summary(tune.out_l)
+
+# Fitting SVM-Polynomial
+poly.svmfit_l<-svm(Class~.,data=data_rose_l,kernel="polynomial",cost=10,degree=3)
+
+# Predicting test set results
+poly.pred_l=predict(poly.svmfit_l,test_l)
+table(poly.pred_l,test_l$Class)
+mean(poly.pred_l==test_l$Class)
+mean(poly.pred_l!=test_l$Class)
+```
+#j)SVM Linear
+```{r}
+#SVM-Linear
+# Tuning to obtain the best parameter estimates
+tune.out_l<-tune(svm,Class~.,data=data_rose_l[,c("Class",index_LS)],kernel="linear")
+summary(tune.out_l)
+
+# Fitting SVM-Linear
+linear.svmfit_l<-svm(Class~.,data=data_rose_l,kernel="linear",cost=1)
+summary(linear.svmfit_l)
+
+# Predicting test set results
+linear.pred_l<-predict(linear.svmfit_l, test_l)
+table(linear.pred_l, test_l$Class)
+mean(linear.pred_l==test_l$Class)
+mean(linear.pred_l!=test_l$Class)
+```
+#k)LDA
+```{r}
+#LDA uses library "MASS"
+set.seed(1)
+lda.fit_l<-lda(Class~.,data=data_rose_l)
+summary(lda.fit_l)
+
+
+# Predicting test set results
+lda.pred_l<-predict(lda.fit_l,test_l)
+lda.class_l<-lda.pred_l$class
+table(lda.class_l,test_l$Class)
+mean(lda.class_l==test_l$Class)
+mean(lda.class_l!=test_l$Class)
+```
+# l)Logistic regression
+# After feature selection, we constructed the binary logistic regression model with the training set. The following table shows the result of this model. By arranging the top twenty significant coefficients, we can figure out that how the parameters of these sensors effect the semiconductors.
+#As the baseline of this model is “pass”, we can say that when feature60 increase, there is a strong possibility that semiconductor will fail and vice versa. As we know confusion matrix and Receiver operating characteristic (ROC) curve are two of the performance metrics use to evaluate accuracy, thus we chose both of them in this study. 
+```{r}
+#Logistic Regression uses library MASS and glmnet
+fit_l <- glm(Class ~ ., data=data_rose_l[,c("Class",index_LS)], family = "binomial")
+table_l <- round(summary(fit_l)$coefficient, 4)
+table_l[order(table_l[,4])[1:20],]
+
+#Since we hope to find out the failure cases, considering a proper criteria to balance between sensitivity and specificity is also important. If we wish to be more rigorous to find out the defect ones, on the other hand will happen to be a higher chance predicting good into bad. This is a trade off need to be balance.
+pred_l <- factor(ifelse(predict(fit_l, test_l, type = "response") > 0.5, "fail", "pass"), levels <- c("pass", "fail"))
+table(test_l$Class, pred_l)
+
+#AUC graph summarizes the performance of a classifier over all possible thresholds. It is generated by plotting the True Positive Rate (y-axis) against the False Positive Rate (x-axis) as you vary the threshold for assigning observations to a given class.Area under the curve (AUC): 0.748
+roc.curve(test_l$Class, predict(fit_l, test_l))
+```
+
+
+#To remove variable in environment which are created during program run
+```{r}
+rm(list = ls(pattern = "^secom_"))
+rm(list = ls(pattern = "^row_"))
+rm(list = ls(pattern = "^col_"))
+rm(list = ls(pattern = "^data"))
+rm(list = ls(pattern = "^m"))
+rm(list = ls(pattern = "^knn"))
+rm(list = ls(pattern = "^r"))
+rm(list = ls(pattern = "^fi"))
+rm(list = ls(pattern = "^df"))
+rm(list = ls(pattern = "^coef"))
+rm(list = ls(pattern = "^Accuracy"))
+rm(list = ls(pattern = "^bag"))
+rm(list = ls(pattern = "^boost"))
+rm(list = ls(pattern = "^boruta"))
+rm(list = ls(pattern = "^cv"))
+rm(list = ls(pattern = "^i"))
+rm(list = ls(pattern = "^n"))
+rm(list = ls(pattern = "^p"))
+
+remove(list = ls()[(grepl("l", ls()))])
+remove(list = ls()[(grepl("t", ls()))])
+
+
+
+
+
+
+```
+
